@@ -12,8 +12,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.ie.webdriver import WebDriver
 
-csv_filename = "already_recommended.csv"
-base_url = "https://www.portalinmobiliario.com/arriendo/departamento/_DisplayType_M_PriceRange_0CLP-1650000CLP_BEDROOMS_2-*_COVERED*AREA_88-*_MAINTENANCE*FEE_*-390000_item*location_lat:-33.446340605284135*-33.40887665657937,lon:-70.64058941833497*-70.54875058166505?polygon_location=%60w%7DjEf%7E%7BmLfE%7BSdBkDxY%7DZ%60GmTxMaOxHkDhIeIrJmElHp%40tAcA%7CC%3F%7EBzDtEfBfAbHdFhKLnMfAvBfAtH%3Fp%5DgAxJuA%7E%5Cy%40pFcF%7CEcK%60%40_LvBoGjDcSxCkDjDmYr%40uAa%40gEuHmCq%40y%40_FkDoFk%40eIuAaGoGsHMp%40"
+csv_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "already_recommended.csv")
+base_url = "https://www.portalinmobiliario.com/venta/departamento/_DisplayType_M_PriceRange_330000000CLP-420000000CLP_BEDROOMS_3-*_COVERED*AREA_110m%C2%B2-*_FULL*BATHROOMS_2-*_HAS*LIFT_242085_MAINTENANCE*FEE_*-350000CLP_PARKING*LOTS_1-*_item*location_lat:-33.43787952750852*-33.41621046762059,lon:-70.60850690490723*-70.56988309509278?polygon_location=%60xakEzl%7CmLp%40_%60%40y%40oJqDgQeDsZoMy%60%40iC_YqByFiIkLgGmEyDeAiIXaZvI%7DRdT%7DE%7CLiIbi%40i%40hR%7E%40l%5BlApNxBlIFzR%7EBfNjBnBrj%40Q%60TqC%60GeBlL%7BGrWPrF_FUlA"
 
 
 def extract_links(session: Session) -> list[str]:
@@ -31,24 +31,14 @@ def check_orientation(specs):
         orientation = specs["Orientación"]
     except:
         return True
-    return orientation == "NO" or orientation == "O" or orientation == "NP" or orientation == "N" or orientation == "SO" or orientation == "S"
+    return 'N' in orientation
 
-
-def check_total_price(specs):
+def check_floor(specs):
     try:
-        ggcc = specs["Gastos comunes"].replace('.', '').replace(' CLP', '')
-        price = specs["Precio"]
+        floor = int(specs["Número de piso de la unidad"])
     except:
         return True
-    return int(ggcc) + int(price) <= 1650000
-
-
-def check_elevator(specs):
-    try:
-        elevator = specs["Ascensor"]
-    except:
-        return True
-    return elevator == "Sí"
+    return floor >= 4 and floor <= 8
 
 
 def is_link_suitable(driver: WebDriver, link: str) -> bool:
@@ -56,8 +46,7 @@ def is_link_suitable(driver: WebDriver, link: str) -> bool:
 
     specs = extract_specs(content)
     return (check_orientation(specs)
-            and check_total_price(specs)
-            and check_elevator(specs))
+            and check_floor(specs))
 
 
 def extract_specs(content: str) -> dict:
