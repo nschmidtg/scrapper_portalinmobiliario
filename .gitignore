@@ -3,3 +3,5 @@
 __pycache__/
 *.pyc
 already_recommended.csv
+cumplen.csv
+revisar.csv

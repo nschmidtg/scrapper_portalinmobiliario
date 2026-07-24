@@ -1,5 +1,6 @@
 import csv
 import os.path
+import re
 from datetime import datetime
 
 import requests
@@ -13,7 +14,30 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.ie.webdriver import WebDriver
 
 csv_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "already_recommended.csv")
+report_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cumplen.csv")
+revisar_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "revisar.csv")
 base_url = "https://www.portalinmobiliario.com/venta/departamento/_DisplayType_M_PriceRange_330000000CLP-420000000CLP_BEDROOMS_3-*_COVERED*AREA_110m%C2%B2-*_FULL*BATHROOMS_2-*_HAS*LIFT_242085_MAINTENANCE*FEE_*-350000CLP_PARKING*LOTS_1-*_item*location_lat:-33.43787952750852*-33.41621046762059,lon:-70.60850690490723*-70.56988309509278?polygon_location=%60xakEzl%7CmLp%40_%60%40y%40oJqDgQeDsZoMy%60%40iC_YqByFiIkLgGmEyDeAiIXaZvI%7DRdT%7DE%7CLiIbi%40i%40hR%7E%40l%5BlApNxBlIFzR%7EBfNjBnBrj%40Q%60TqC%60GeBlL%7BGrWPrF_FUlA"
+
+# Atributos técnicos ("Dormitorios", "Dormitorio y baño de servicio", etc.) que Portal Inmobiliario
+# no siempre renderiza en la tabla visible, pero sí incluye en el JSON embebido de la página.
+JSON_ATTR_PATTERN = re.compile(r'\{"id":"([^"]+)","text":"([^"]*)"\}')
+
+# Menciones de dormitorio/pieza/cuarto/dependencia/baño "de servicio" en el título o la descripción,
+# como respaldo cuando el atributo estructurado no está disponible.
+SERVICIO_TEXTO_PATTERN = re.compile(
+    r'(dormitorio|pieza|cuarto|habitaci[oó]n|dependencia|ba[ñn]o)\w*\s+(y\s+ba[ñn]o\s+)?de\s+servicio',
+    re.IGNORECASE,
+)
+
+# Menciones a que la propiedad necesita reforma/remodelación en el título o la descripción.
+# Los lookbehind excluyen negaciones directas ("no necesita reforma", "sin necesidad de remodelar").
+REFORMA_TEXTO_PATTERNS = [
+    re.compile(r'(?<!no )(?<!sin )\b(?:a|para|por)\s+reformar\b', re.IGNORECASE),
+    re.compile(r'(?<!no )(?<!sin )\b(?:a|para|por)\s+remodelar\b', re.IGNORECASE),
+    re.compile(r'(?<!no )(?<!sin )\b(?:a|para|por)\s+refaccionar\b', re.IGNORECASE),
+    re.compile(r'(?<!no )(?<!sin )\bnecesita\w*\s+(?:reforma|remodelaci[oó]n|refacci[oó]n)\w*\b', re.IGNORECASE),
+    re.compile(r'(?<!no )(?<!sin )\brequiere\w*\s+(?:reforma|remodelaci[oó]n)\w*\b', re.IGNORECASE),
+]
 
 
 def extract_links(session: Session) -> list[str]:
@@ -41,12 +65,64 @@ def check_floor(specs):
     return floor >= 4 and floor <= 8
 
 
-def is_link_suitable(driver: WebDriver, link: str) -> bool:
-    content = navigate_and_extract_content(driver, link)
+def check_bedrooms(specs):
+    """
+    Devuelve True (cumple), False (no cumple) o None (dato no concluyente,
+    requiere revisión manual): 4+ dormitorios, o 3 dormitorios con
+    dormitorio de servicio confirmado por el atributo estructurado o por
+    una mención explícita en el título/descripción.
+    """
+    try:
+        dormitorios = int(specs["Dormitorios"])
+    except:
+        return None
+    if dormitorios >= 4:
+        return True
+    if dormitorios < 3:
+        return False
 
+    servicio = specs.get("Dormitorio y baño de servicio")
+    if servicio == "Sí":
+        return True
+    if SERVICIO_TEXTO_PATTERN.search(specs.get("_texto", "")):
+        return True
+    if servicio == "No":
+        return False
+    return None
+
+
+def check_reforma(specs):
+    """
+    Devuelve False si el título/descripción menciona que la propiedad
+    necesita reforma/remodelación/refacción (excluyendo negaciones como
+    "no necesita reforma"). True en cualquier otro caso.
+    """
+    texto = specs.get("_texto", "")
+    return not any(pattern.search(texto) for pattern in REFORMA_TEXTO_PATTERNS)
+
+
+def classify_link(driver: WebDriver, link: str) -> str:
+    """
+    Clasifica un link como "cumple", "no_cumple" o "revisar" (dato no
+    concluyente, requiere revisión manual). Solo se descartan los
+    "no_cumple" confirmados.
+    """
+    content = navigate_and_extract_content(driver, link)
     specs = extract_specs(content)
-    return (check_orientation(specs)
-            and check_floor(specs))
+
+    if not check_orientation(specs):
+        return "no_cumple"
+    if not check_floor(specs):
+        return "no_cumple"
+    if not check_reforma(specs):
+        return "no_cumple"
+
+    bedrooms_result = check_bedrooms(specs)
+    if bedrooms_result is False:
+        return "no_cumple"
+    if bedrooms_result is None:
+        return "revisar"
+    return "cumple"
 
 
 def extract_specs(content: str) -> dict:
@@ -74,6 +150,21 @@ def extract_specs(content: str) -> dict:
         specs["Gastos comunes"] = ggcc_string
     except:
         print("Gastos comunes no está en el header")
+
+    # Algunos atributos (ej. "Dormitorio y baño de servicio") no se renderizan en la tabla
+    # visible, pero sí están en el JSON embebido de la página. Solo rellenamos los que
+    # falten para no pisar los valores ya obtenidos de la tabla.
+    for key, value in JSON_ATTR_PATTERN.findall(content):
+        specs.setdefault(key, value)
+
+    # Título + descripción, usados como respaldo por check_bedrooms para detectar
+    # menciones a un dormitorio/pieza de servicio cuando el atributo no está presente.
+    titulo = soup.find("h1")
+    descripcion = soup.find("p", class_="ui-pdp-description__content")
+    specs["_texto"] = " ".join([
+        titulo.text if titulo else "",
+        descripcion.text if descripcion else "",
+    ])
 
     return specs
 
@@ -149,7 +240,9 @@ def normalize_link(link: str) -> str:
 
 def open_or_create_csv() -> dict:
     """
-    Lee el CSV existente y retorna un diccionario con link_normalizado: (link_original, cumple_requisitos, timestamp)
+    Lee el CSV existente y retorna un diccionario con
+    link_normalizado: (link_original, estado, timestamp), donde estado es
+    "cumple", "no_cumple" o "revisar".
     """
     already_saved = {}
     if os.path.exists(csv_filename):
@@ -158,11 +251,14 @@ def open_or_create_csv() -> dict:
             for row in reader:
                 if len(row) >= 2:
                     link = row[0]
-                    cumple = row[1].lower() == 'true'
+                    estado = row[1]
+                    # Compatibilidad con el formato anterior (booleano True/False)
+                    if estado.lower() in ('true', 'false'):
+                        estado = 'cumple' if estado.lower() == 'true' else 'no_cumple'
                     timestamp = row[2] if len(row) >= 3 else ''
                     link_normalizado = normalize_link(link)
                     # Guardamos con link normalizado como key, pero mantenemos el original
-                    already_saved[link_normalizado] = (link, cumple, timestamp)
+                    already_saved[link_normalizado] = (link, estado, timestamp)
 
     return already_saved
 
@@ -170,17 +266,41 @@ def open_or_create_csv() -> dict:
 def save_links(links_dict):
     """
     Guarda todos los links con su estado en el CSV
-    links_dict tiene formato: {link_normalizado: (link_original, cumple, timestamp)}
+    links_dict tiene formato: {link_normalizado: (link_original, estado, timestamp)}
     """
     with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        for link_normalizado, (link_original, cumple, timestamp) in links_dict.items():
-            writer.writerow([link_original, cumple, timestamp])
+        for link_normalizado, (link_original, estado, timestamp) in links_dict.items():
+            writer.writerow([link_original, estado, timestamp])
+
+
+def save_filtered_report(links_dict, estado_filtro, filename):
+    """
+    Escribe un reporte con los links en el estado dado (pasados y nuevos),
+    ordenados de más reciente a más antiguo según su timestamp.
+    """
+    filtrados = [
+        (link_original, timestamp)
+        for link_original, estado, timestamp in links_dict.values()
+        if estado == estado_filtro
+    ]
+    filtrados.sort(key=lambda row: row[1], reverse=True)
+
+    with open(filename, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["link", "timestamp"])
+        for link_original, timestamp in filtrados:
+            writer.writerow([link_original, timestamp])
+
+
+def save_reports(links_dict):
+    save_filtered_report(links_dict, "cumple", report_filename)
+    save_filtered_report(links_dict, "revisar", revisar_filename)
 
 
 if __name__ == "__main__":
     # Cargar links ya procesados PRIMERO (antes de iniciar driver)
-    # saved_links tiene formato: {link_normalizado: (link_original, cumple)}
+    # saved_links tiene formato: {link_normalizado: (link_original, estado, timestamp)}
     saved_links = open_or_create_csv()
     print(f"Links ya guardados en CSV: {len(saved_links)}")
 
@@ -202,23 +322,28 @@ if __name__ == "__main__":
 
     if len(links_nuevos) == 0:
         print("No hay links nuevos para procesar.")
+        save_reports(saved_links)
     else:
         # Solo iniciar driver si hay links nuevos
         driver = webdriver.Chrome()
 
         nuevos_que_cumplen = []
+        nuevos_a_revisar = []
 
         for i, link in enumerate(links_nuevos, 1):
             print(f"\n[{i}/{len(links_nuevos)}] Analizando: {link}")
-            cumple = is_link_suitable(driver, link)
+            estado = classify_link(driver, link)
             link_normalizado = normalize_link(link)
             # Guardamos con el link original completo (con tracking_id)
             timestamp = datetime.now().isoformat()
-            saved_links[link_normalizado] = (link, cumple, timestamp)
+            saved_links[link_normalizado] = (link, estado, timestamp)
 
-            if cumple:
+            if estado == "cumple":
                 nuevos_que_cumplen.append(link)
                 print(f"✓ CUMPLE REQUISITOS")
+            elif estado == "revisar":
+                nuevos_a_revisar.append(link)
+                print(f"? A REVISAR (dato no concluyente)")
             else:
                 print(f"✗ No cumple requisitos")
 
@@ -229,11 +354,20 @@ if __name__ == "__main__":
         # Guardar todos los links (viejos + nuevos)
         save_links(saved_links)
 
+        # Actualizar los reportes de los que cumplen y los que hay que revisar (pasados + nuevos)
+        save_reports(saved_links)
+
         # Mostrar solo los nuevos que cumplen
         print(f"\n{'=' * 60}")
         print(f"NUEVOS LINKS QUE CUMPLEN REQUISITOS:")
         print(f"{'=' * 60}")
         for link in nuevos_que_cumplen:
+            print(link)
+
+        print(f"\n{'=' * 60}")
+        print(f"NUEVOS LINKS A REVISAR MANUALMENTE:")
+        print(f"{'=' * 60}")
+        for link in nuevos_a_revisar:
             print(link)
 
         # Resumen
@@ -243,5 +377,6 @@ if __name__ == "__main__":
         print(f"Links que ya estaban guardados: {len(links) - len(links_nuevos)}")
         print(f"Nuevos links procesados: {len(links_nuevos)}")
         print(f"Nuevos que CUMPLEN requisitos: {len(nuevos_que_cumplen)}")
+        print(f"Nuevos a revisar manualmente: {len(nuevos_a_revisar)}")
         print(f"Total acumulado en CSV: {len(saved_links)}")
         print(f"{'=' * 60}")
