@@ -13,14 +13,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.ie.webdriver import WebDriver
 
 csv_filename = "already_recommended.csv"
-base_url = "https://www.portalinmobiliario.com/arriendo/departamento/_DisplayType_M_PriceRange_0CLP-1600000CLP_BEDROOMS_2-*_COVERED*AREA_100-*_MAINTENANCE*FEE_*-390000_PARKING*LOTS_1-*_item*location_lat:-33.446340605284135*-33.40887665657937,lon:-70.64058941833497*-70.54875058166505?polygon_location=%60w%7DjEf%7E%7BmLfE%7BSdBkDxY%7DZ%60GmTxMaOxHkDhIeIrJmElHp%40tAcA%7CC%3F%7EBzDtEfBfAbHdFhKLnMfAvBfAtH%3Fp%5DgAxJuA%7E%5Cy%40pFcF%7CEcK%60%40_LvBoGjDcSxCkDjDmYr%40uAa%40gEuHmCq%40y%40_FkDoFk%40eIuAaGoGsHMp%40"
+base_url = "https://www.portalinmobiliario.com/arriendo/departamento/_DisplayType_M_PriceRange_0CLP-1650000CLP_BEDROOMS_2-*_COVERED*AREA_88-*_MAINTENANCE*FEE_*-390000_item*location_lat:-33.446340605284135*-33.40887665657937,lon:-70.64058941833497*-70.54875058166505?polygon_location=%60w%7DjEf%7E%7BmLfE%7BSdBkDxY%7DZ%60GmTxMaOxHkDhIeIrJmElHp%40tAcA%7CC%3F%7EBzDtEfBfAbHdFhKLnMfAvBfAtH%3Fp%5DgAxJuA%7E%5Cy%40pFcF%7CEcK%60%40_LvBoGjDcSxCkDjDmYr%40uAa%40gEuHmCq%40y%40_FkDoFk%40eIuAaGoGsHMp%40"
 
 
 def extract_links(session: Session) -> list[str]:
     response = session.get(base_url)
     response.encoding = "utf-8"
     soup = BeautifulSoup(response.content, 'html.parser')
-    tag_elements = soup.find_all("a", class_="ui-search-result__main-image-link")
+    tag_elements = soup.find_all("a", class_="poly-component__title")
     links = [tag.get("href") for tag in tag_elements]
 
     return links
@@ -31,7 +31,7 @@ def check_orientation(specs):
         orientation = specs["Orientación"]
     except:
         return True
-    return orientation == "NO" or orientation == "O" or orientation == "NP"
+    return orientation == "NO" or orientation == "O" or orientation == "NP" or orientation == "N" or orientation == "SO" or orientation == "S"
 
 
 def check_total_price(specs):
@@ -77,6 +77,15 @@ def extract_specs(content: str) -> dict:
         # specs["Gastos comunes"] = prices[1].text.replace('.', '')
     elif len(prices) == 2:
         specs["Precio"] = prices[1].text.replace('.', '')
+
+    try:
+        ggcc_div = soup.find("div", id="maintenance_fee_vis")
+        ggcc_p = ggcc_div.find("p", class_="ui-pdp-color--GRAY ui-pdp-size--XSMALL ui-pdp-family--REGULAR ui-pdp-maintenance-fee-ltr")
+        ggcc_string = ggcc_p.text.split("$ ")[1].replace('.', '')
+        specs["Gastos comunes"] = ggcc_string
+    except:
+        print("Gastos comunes no está en el header")
+
     return specs
 
 
@@ -189,8 +198,6 @@ if __name__ == "__main__":
     session = requests.Session()
     session.headers.update({
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/122.0.0.0 Safari/537.36"
         ),
     })
