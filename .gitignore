@@ -5,3 +5,7 @@ __pycache__/
 already_recommended.csv
 cumplen.csv
 revisar.csv
+propiedades.csv
+mapa.html
+.pytest_cache/
+tests/fixtures/*.html

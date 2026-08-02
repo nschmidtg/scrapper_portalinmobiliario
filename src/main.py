@@ -1,6 +1,7 @@
 import csv
 import os.path
 import re
+import sys
 from datetime import datetime
 
 import requests
@@ -13,21 +14,34 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.ie.webdriver import WebDriver
 
+# Permite correr esto tanto como `python src/main.py` como `python -m src.main`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.mapa import generar_mapa
+from src.propiedades import (
+    ESCRITORIO_TEXTO_PATTERN,
+    SERVICIO_TEXTO_PATTERN,
+    extract_datos,
+    load_cache,
+    mlc_id,
+    parse_m2,
+    update_cache,
+)
+
 csv_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "already_recommended.csv")
 report_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cumplen.csv")
 revisar_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "revisar.csv")
-base_url = "https://www.portalinmobiliario.com/venta/departamento/_DisplayType_M_PriceRange_330000000CLP-420000000CLP_BEDROOMS_3-*_COVERED*AREA_110m%C2%B2-*_FULL*BATHROOMS_2-*_HAS*LIFT_242085_MAINTENANCE*FEE_*-350000CLP_PARKING*LOTS_1-*_item*location_lat:-33.43850925374652*-33.4168403510786,lon:-70.6145569049072*-70.57593309509275?polygon_location=da%7EjEhl%7CmLdFnQ%7E%40hCpBFdFkAbB%7B%40zF_BlEi%40%7CAa%40rDYdAa%40xBY%7CCmA%7CA%3FpBq%40hIgBdA%3Fx%40Q%7CAq%40fCs%40xDi%40%7E%40%3FvEeARO%7CCc%40rFHb%40a%40%3FgBq%40wBk%40kD%5BiG_A_JGwFgAmLMmI%5BoFq%40gBgAuAgAwBmAmAsBsAuAuDuAkAwBqC%7DAYmAXUjAy%40nBgC%7CD%7DCxCi%40z%40aCnB%5Bz%40q%40z%40%7DAjAw%40lAgAbAgCbDgAhCc%40h%40Mz%40%5Bj%40wGdI_Ap%40gAtAUHgCbE%5BlAk%40z%40cFnFoAvBuA%7CA%7BAhCyBpCcB%7EE%3Fh%40RFb%40tAq%40%7B%40"
+base_url = "https://www.portalinmobiliario.com/venta/departamento/_DisplayType_M_PriceRange_320000000CLP-390000000CLP_BEDROOMS_3-*_COVERED*AREA_95m%C2%B2-*_FULL*BATHROOMS_2-*_HAS*LIFT_242085_HAS*TERRACE_242085_MAINTENANCE*FEE_*-350000CLP_PARKING*LOTS_1-*_item*location_lat:-33.43442709417597*-33.423592809404326,lon:-70.60679095245361*-70.58747904754638?polygon_location=lr%60kEhp%7CmL%7DCb%40%3FFc%40%3FkDtA%7BAXkDX%3FFeFF%3FFmAH%3FFaA%3Fi%40_CGmAi%40oBq%40oF_AyCUkD%5DeB%3Fs%40a%40aCO%7BD%5B_Cy%40%7BCa%40qG%3FmAR%7DA%7CA%3Fp%40Y%3Fi%40x%40sD%3Fs%40Ra%40%60C%3FLG%3Fc%40Ti%40lAF%3FHnC%3FbBs%40tAIZOvIGxBz%40tAjAT%60%40L%3F%7E%40tAZP%60AlAb%40jARpC%60A%60Gp%40rHDnBx%40nFD%60GMr%40EfCO%7EASp%40gCzCuAbAyBbAgAHfAc%40"
 
 # Atributos técnicos ("Dormitorios", "Dormitorio y baño de servicio", etc.) que Portal Inmobiliario
 # no siempre renderiza en la tabla visible, pero sí incluye en el JSON embebido de la página.
 JSON_ATTR_PATTERN = re.compile(r'\{"id":"([^"]+)","text":"([^"]*)"\}')
 
-# Menciones de dormitorio/pieza/cuarto/dependencia/baño "de servicio" en el título o la descripción,
-# como respaldo cuando el atributo estructurado no está disponible.
-SERVICIO_TEXTO_PATTERN = re.compile(
-    r'(dormitorio|pieza|cuarto|habitaci[oó]n|dependencia|ba[ñn]o)\w*\s+(y\s+ba[ñn]o\s+)?de\s+servicio',
-    re.IGNORECASE,
-)
+# Los patrones de habitación de servicio y escritorio viven en src/propiedades.py
+# para que el filtro y los datos que alimentan el mapa usen la misma definición.
+
+# Superficie mínima de terraza exigida, en m².
+TERRAZA_MINIMA_M2 = 8.0
 
 # Menciones a que la propiedad necesita reforma/remodelación en el título o la descripción.
 # Los lookbehind excluyen negaciones directas ("no necesita reforma", "sin necesidad de remodelar").
@@ -68,9 +82,18 @@ def check_floor(specs):
 def check_bedrooms(specs):
     """
     Devuelve True (cumple), False (no cumple) o None (dato no concluyente,
-    requiere revisión manual): 4+ dormitorios, o 3 dormitorios con
-    dormitorio de servicio confirmado por el atributo estructurado o por
-    una mención explícita en el título/descripción.
+    requiere revisión manual):
+
+      - 4+ dormitorios: cumple.
+      - 3 dormitorios: cumple si hay habitación de servicio O escritorio.
+        El servicio se confirma por el atributo estructurado o por mención en
+        el título/descripción; el escritorio solo por texto, porque Portal
+        Inmobiliario no lo expone como atributo.
+      - Menos de 3: no cumple.
+
+    Con 3 dormitorios, si el atributo de servicio dice "No" y tampoco hay
+    mención de escritorio, se descarta; si el atributo no viene, queda en
+    "revisar" en vez de descartarse.
     """
     try:
         dormitorios = int(specs["Dormitorios"])
@@ -81,14 +104,31 @@ def check_bedrooms(specs):
     if dormitorios < 3:
         return False
 
+    texto = specs.get("_texto", "")
     servicio = specs.get("Dormitorio y baño de servicio")
-    if servicio == "Sí":
+    if servicio == "Sí" or SERVICIO_TEXTO_PATTERN.search(texto):
         return True
-    if SERVICIO_TEXTO_PATTERN.search(specs.get("_texto", "")):
+    if ESCRITORIO_TEXTO_PATTERN.search(texto):
         return True
     if servicio == "No":
         return False
     return None
+
+
+def check_terraza(specs):
+    """
+    Devuelve True (cumple), False (no cumple) o None (dato no concluyente,
+    requiere revisión manual): la terraza debe tener al menos
+    TERRAZA_MINIMA_M2 m².
+
+    La búsqueda ya filtra por HAS_TERRACE, así que una publicación sin el
+    atributo igual tiene terraza, solo que no declara cuánto mide: no alcanza
+    para descartarla, se manda a revisar.
+    """
+    m2 = parse_m2(specs.get("Superficie de terraza"))
+    if m2 is None:
+        return None
+    return m2 >= TERRAZA_MINIMA_M2
 
 
 def check_reforma(specs):
@@ -106,21 +146,30 @@ def classify_link(driver: WebDriver, link: str) -> str:
     Clasifica un link como "cumple", "no_cumple" o "revisar" (dato no
     concluyente, requiere revisión manual). Solo se descartan los
     "no_cumple" confirmados.
+
+    De paso cachea la ubicación y los datos de la publicación en
+    propiedades.csv, que es lo que consume el mapa (src/mapa.py).
     """
     content = navigate_and_extract_content(driver, link)
     specs = extract_specs(content)
+
+    # Se cachea antes de los filtros para que el mapa pueda mostrar también
+    # los descartados como contexto del barrio.
+    update_cache(extract_datos(content, link))
 
     if not check_orientation(specs):
         return "no_cumple"
     if not check_floor(specs):
         return "no_cumple"
-    if not check_reforma(specs):
-        return "no_cumple"
+    # if not check_reforma(specs):
+    #     return "no_cumple"
 
-    bedrooms_result = check_bedrooms(specs)
-    if bedrooms_result is False:
+    # Filtros tri-estado: basta un False confirmado para descartar, y si no hay
+    # ninguno, cualquier dato no concluyente manda la publicación a revisar.
+    resultados = [check_bedrooms(specs), check_terraza(specs)]
+    if any(resultado is False for resultado in resultados):
         return "no_cumple"
-    if bedrooms_result is None:
+    if any(resultado is None for resultado in resultados):
         return "revisar"
     return "cumple"
 
@@ -274,28 +323,58 @@ def save_links(links_dict):
             writer.writerow([link_original, estado, timestamp])
 
 
+REPORTE_COLUMNAS = [
+    "precio",
+    "precio_m2",
+    "base_m2",
+    "gastos_comunes",
+    "dormitorios",
+    "banos",
+    "superficie_util",
+    "superficie_total",
+    "superficie_terraza",
+    "piso",
+    "orientacion",
+    "servicio",
+    "escritorio",
+    "titulo",
+    "lat",
+    "lon",
+]
+
+
 def save_filtered_report(links_dict, estado_filtro, filename):
     """
     Escribe un reporte con los links en el estado dado (pasados y nuevos),
-    ordenados de más reciente a más antiguo según su timestamp.
+    enriquecido con los datos cacheados de cada publicación y ordenado de
+    menor a mayor precio por m² (las publicaciones sin ese dato van al final).
     """
-    filtrados = [
-        (link_original, timestamp)
-        for link_original, estado, timestamp in links_dict.values()
-        if estado == estado_filtro
-    ]
-    filtrados.sort(key=lambda row: row[1], reverse=True)
+    cache = load_cache()
+    filas = []
+    for link_original, estado, timestamp in links_dict.values():
+        if estado != estado_filtro:
+            continue
+        datos = cache.get(mlc_id(link_original) or "", {})
+        filas.append({
+            "link": link_original,
+            "timestamp": timestamp,
+            **{columna: datos.get(columna) for columna in REPORTE_COLUMNAS},
+        })
+
+    filas.sort(key=lambda fila: (fila["precio_m2"] is None, fila["precio_m2"] or 0))
 
     with open(filename, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["link", "timestamp"])
-        for link_original, timestamp in filtrados:
-            writer.writerow([link_original, timestamp])
+        writer = csv.DictWriter(
+            f, fieldnames=["link", "timestamp"] + REPORTE_COLUMNAS, extrasaction='ignore'
+        )
+        writer.writeheader()
+        writer.writerows(filas)
 
 
 def save_reports(links_dict):
     save_filtered_report(links_dict, "cumple", report_filename)
     save_filtered_report(links_dict, "revisar", revisar_filename)
+    generar_mapa(links_dict)
 
 
 if __name__ == "__main__":
