@@ -3,8 +3,14 @@ Genera mapa.html: un mapa Leaflet con un pin por publicación, coloreado según
 su estado (cumple / revisar / no cumple) y con link a la publicación original.
 
 Uso:
+    python src/servidor.py          # sirve el mapa y habilita el botón "descartar"
     python src/mapa.py              # genera el mapa con lo que ya está cacheado
     python src/mapa.py --backfill   # antes de generar, busca los datos que falten
+
+El popup de las que no cumplen muestra el motivo, recalculado desde el cache, y
+las publicaciones listadas en descartados.csv no se dibujan (ver src/descartar.py).
+El botón para descartarlas necesita src/servidor.py: un mapa abierto como archivo
+no puede escribir en el disco, así que ahí el botón no aparece.
 
 El --backfill recorre los links de already_recommended.csv que todavía no tienen
 coordenadas y las descarga con requests (no necesita Selenium: el pin está en el
@@ -21,6 +27,8 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.descartar import sin_descartados
+from src.filtros import CUMPLE, evaluar, specs_desde_cache
 from src.propiedades import (
     extract_datos,
     load_cache,
@@ -93,6 +101,22 @@ def backfill(saved_links: dict) -> dict:
     return cache
 
 
+def motivo_de(estado: str, datos: dict) -> str:
+    """
+    Por qué esta publicación no cumple, recalculado desde propiedades.csv.
+
+    El motivo no se guarda en ningún CSV: se vuelve a evaluar acá, así que las
+    publicaciones viejas también lo muestran y no queda desactualizado cuando se
+    ajusta un filtro. Puede volver "" si el estado guardado se decidió con datos
+    que el cache no tiene (el texto del aviso, por ejemplo); en ese caso el
+    popup simplemente no muestra la línea.
+    """
+    if estado == CUMPLE:
+        return ""
+    _estado, motivo = evaluar(specs_desde_cache(datos))
+    return motivo
+
+
 def build_puntos(saved_links: dict, cache: dict) -> list[dict]:
     """Cruza los estados de already_recommended.csv con los datos cacheados."""
     puntos = []
@@ -106,7 +130,9 @@ def build_puntos(saved_links: dict, cache: dict) -> list[dict]:
         puntos.append({
             "lat": datos["lat"],
             "lon": datos["lon"],
+            "mlc_id": identificador,
             "estado": estado,
+            "motivo": motivo_de(estado, datos),
             "titulo": datos.get("titulo") or identificador,
             "link": link_original,
             "precio": datos.get("precio"),
@@ -184,8 +210,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .popup .precio { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
   .popup .ggcc { color: #5f6368; font-size: 11px; margin-bottom: 6px; }
   .popup .specs { color: #3c4043; margin-bottom: 8px; }
+  .popup .motivo {
+    background: #f1f3f4; border-left: 3px solid #d0d3d6; border-radius: 0 4px 4px 0;
+    color: #5f6368; font-size: 11px; padding: 4px 6px; margin-bottom: 8px;
+  }
   .popup a { color: #1a73e8; font-weight: 600; text-decoration: none; }
   .popup a:hover { text-decoration: underline; }
+  .popup .acciones { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .popup button.descartar {
+    font: inherit; font-size: 11px; color: #c5221f; background: #fff;
+    border: 1px solid #f0c4c3; border-radius: 4px; padding: 3px 8px; cursor: pointer;
+  }
+  .popup button.descartar:hover { background: #fce8e6; }
+  .popup button.descartar:disabled { opacity: .5; cursor: default; }
+  .aviso {
+    position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); z-index: 1002;
+    display: flex; align-items: center; gap: 12px; max-width: 90vw;
+    background: rgba(32,33,36,.94); color: #fff; font-size: 13px;
+    border-radius: 8px; padding: 9px 14px; box-shadow: 0 2px 12px rgba(0,0,0,.3);
+  }
+  .aviso button {
+    font: inherit; font-weight: 600; color: #8ab4f8; background: none;
+    border: none; padding: 0; cursor: pointer; white-space: nowrap;
+  }
+  .nota-servidor { font-size: 10px; color: #80868b; margin-top: 8px; line-height: 1.35; }
+  .nota-servidor code { background: #e8eaed; padding: 1px 4px; border-radius: 3px; }
   .leaflet-tooltip.precio-tip {
     background: rgba(32,33,36,.88); border: none; color: #fff; font-size: 11px;
     font-weight: 600; padding: 1px 5px; box-shadow: none; border-radius: 4px;
@@ -208,7 +257,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="rotulos"><span id="escala-min"></span><span id="escala-max"></span></div>
     <div class="nota" id="escala-nota"></div>
   </div>
+  <p class="nota-servidor" id="nota-servidor" hidden>
+    Para descartar publicaciones con un click, abrí el mapa con
+    <code>python src/servidor.py</code>.
+  </p>
 </div>
+<div class="aviso" id="aviso" hidden></div>
 <div class="vacio" id="vacio" hidden>
   <div>
     <p><strong>Todavía no hay pines para mostrar.</strong></p>
@@ -220,6 +274,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 const PUNTOS = __PUNTOS__;
 const ESTADOS = __ESTADOS__;
+
+// El botón de descartar necesita que alguien escriba en descartados.csv, y eso
+// solo existe cuando el mapa lo sirve src/servidor.py. Abierto como archivo
+// (file://) el mapa funciona igual, pero sin el botón.
+const EN_SERVIDOR = location.protocol === "http:" || location.protocol === "https:";
 
 const clp = n => n == null ? null : "$" + n.toLocaleString("es-CL");
 const millones = n => n == null ? "" : "$" + Math.round(n / 1e6) + "M";
@@ -260,6 +319,7 @@ if (!PUNTOS.length) {
   for (const estado of Object.keys(ESTADOS)) capas[estado] = L.layerGroup();
 
   const marcadores = [];
+  const porMlc = new Map();
 
   for (const p of PUNTOS) {
     const specs = [
@@ -280,7 +340,14 @@ if (!PUNTOS.length) {
         ${p.precio_m2 ? `<div class="ggcc">${clp(p.precio_m2)} / m² ${escapar(p.base_m2)}</div>` : ""}
         ${p.gastos_comunes ? `<div class="ggcc">GGCC ${clp(p.gastos_comunes)}</div>` : ""}
         ${specs ? `<div class="specs">${escapar(specs)}</div>` : ""}
-        <a href="${encodeURI(p.link)}" target="_blank" rel="noopener">Ver publicación →</a>
+        ${p.motivo ? `<div class="motivo">${ESTADOS[p.estado].label}: ${escapar(p.motivo)}</div>` : ""}
+        <div class="acciones">
+          <a href="${encodeURI(p.link)}" target="_blank" rel="noopener">Ver publicación →</a>
+          ${EN_SERVIDOR && p.mlc_id
+            ? `<button class="descartar" data-mlc="${escapar(p.mlc_id)}"
+                       title="No la quiero ver más: la saca del mapa y de los reportes">descartar</button>`
+            : ""}
+        </div>
       </div>`;
 
     const marcador = L.circleMarker([p.lat, p.lon], {
@@ -296,7 +363,91 @@ if (!PUNTOS.length) {
       permanent: true, direction: "top", offset: [0, -8], className: "precio-tip"
     });
     marcadores.push(marcador);
+    if (p.mlc_id) porMlc.set(p.mlc_id, marcador);
     marcador.addTo(capas[p.estado]);
+  }
+
+  // El botón vive dentro del popup, que Leaflet crea y destruye a demanda, así
+  // que se engancha cada vez que se abre uno.
+  mapa.on("popupopen", e => {
+    const boton = e.popup.getElement().querySelector("button.descartar");
+    if (boton) boton.addEventListener("click", () => descartarPunto(boton.dataset.mlc, boton));
+  });
+
+  // Descartadas en esta sesión: los pines ya salieron del mapa, pero siguen en
+  // PUNTOS, así que los contadores del panel se calculan descontándolas.
+  const ocultas = new Set();
+
+  async function pedir(ruta, cuerpo) {
+    const respuesta = await fetch(ruta, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cuerpo)
+    });
+    if (!respuesta.ok) throw new Error("HTTP " + respuesta.status);
+    return respuesta.json();
+  }
+
+  async function descartarPunto(mlc, boton) {
+    boton.disabled = true;
+    try {
+      await pedir("/descartar", { mlc_id: mlc });
+    } catch (error) {
+      boton.disabled = false;
+      avisar("No se pudo descartar (" + error.message + ")");
+      return;
+    }
+    const marcador = porMlc.get(mlc);
+    if (marcador) capas[marcador.punto.estado].removeLayer(marcador);
+    mapa.closePopup();
+    ocultas.add(mlc);
+    refrescarPanel();
+    avisar(mlc + " descartada", () => recuperarPunto(mlc));
+  }
+
+  async function recuperarPunto(mlc) {
+    try {
+      await pedir("/quitar", { mlc_id: mlc });
+    } catch (error) {
+      avisar("No se pudo deshacer (" + error.message + ")");
+      return;
+    }
+    const marcador = porMlc.get(mlc);
+    if (marcador) marcador.addTo(capas[marcador.punto.estado]);
+    ocultas.delete(mlc);
+    refrescarPanel();
+    avisar(mlc + " vuelve al mapa");
+  }
+
+  let avisoTimer;
+  function avisar(texto, deshacer) {
+    const aviso = document.getElementById("aviso");
+    aviso.textContent = "";
+    const mensaje = document.createElement("span");
+    mensaje.textContent = texto;
+    aviso.appendChild(mensaje);
+    if (deshacer) {
+      const boton = document.createElement("button");
+      boton.textContent = "Deshacer";
+      boton.addEventListener("click", () => { aviso.hidden = true; deshacer(); });
+      aviso.appendChild(boton);
+    }
+    aviso.hidden = false;
+    clearTimeout(avisoTimer);
+    avisoTimer = setTimeout(() => { aviso.hidden = true; }, 9000);
+  }
+
+  function refrescarPanel() {
+    for (const estado of Object.keys(ESTADOS)) {
+      const contador = document.getElementById("count-" + estado);
+      if (contador) {
+        contador.textContent = PUNTOS.filter(
+          p => p.estado === estado && !ocultas.has(p.mlc_id)
+        ).length;
+      }
+    }
+    document.getElementById("meta").textContent =
+      (PUNTOS.length - ocultas.size) + " publicaciones con ubicación";
   }
 
   function repintar() {
@@ -321,7 +472,7 @@ if (!PUNTOS.length) {
     label.innerHTML = `
       <input type="checkbox" ${encendidos.has(estado) ? "checked" : ""}>
       <span class="dot" style="background:${cfg.color}"></span>
-      <span>${cfg.label}</span><span class="count">${total}</span>`;
+      <span>${cfg.label}</span><span class="count" id="count-${estado}">${total}</span>`;
     label.querySelector("input").addEventListener("change", e => {
       if (e.target.checked) capas[estado].addTo(mapa);
       else mapa.removeLayer(capas[estado]);
@@ -354,9 +505,9 @@ if (!PUNTOS.length) {
     "Calculado sobre superficie útil (o total si no se declara)." +
     (sinDato ? ` ${sinDato} sin dato, en gris.` : "");
 
-  document.getElementById("meta").textContent =
-    PUNTOS.length + " publicaciones con ubicación";
+  document.getElementById("nota-servidor").hidden = EN_SERVIDOR;
 
+  refrescarPanel();
   repintar();
 
   const visibles = PUNTOS.filter(p => encendidos.has(p.estado));
@@ -383,12 +534,20 @@ def render(puntos: list[dict]) -> str:
     )
 
 
-def generar_mapa(saved_links: dict, con_backfill: bool = False) -> str:
+def generar_mapa(saved_links: dict, con_backfill: bool = False, resumen: bool = True) -> str:
+    # Las publicaciones de descartados.csv no se dibujan ni se backfillean,
+    # independiente de con qué estado quedaron guardadas.
+    saved_links = sin_descartados(saved_links)
     cache = backfill(saved_links) if con_backfill else load_cache()
     puntos = build_puntos(saved_links, cache)
 
     with open(mapa_filename, 'w', encoding='utf-8') as f:
         f.write(render(puntos))
+
+    # El servidor regenera el mapa en cada carga de la página: ahí el resumen
+    # sería una parrafada por reload.
+    if not resumen:
+        return mapa_filename
 
     sin_ubicacion = len(saved_links) - len(puntos)
     print(f"\nMapa generado: {mapa_filename}")
