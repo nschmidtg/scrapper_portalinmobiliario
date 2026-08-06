@@ -2,10 +2,9 @@
 .idea/
 __pycache__/
 *.pyc
-already_recommended.csv
-cumplen.csv
-revisar.csv
-propiedades.csv
+# Los CSV de datos se versionan a propósito: son el estado del scraper (qué se
+# evaluó, qué se descartó, qué está cacheado) y sin ellos, al clonar en otra
+# máquina, habría que volver a scrapear todo desde cero.
 mapa.html
 .pytest_cache/
 tests/fixtures/*.html

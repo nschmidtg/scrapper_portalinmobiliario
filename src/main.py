@@ -26,6 +26,7 @@ from src.propiedades import (
     mlc_id,
     update_cache,
 )
+from src.republicaciones import agrupar
 
 csv_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "already_recommended.csv")
 report_filename = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cumplen.csv")
@@ -239,13 +240,13 @@ REPORTE_COLUMNAS = [
 ]
 
 
-def save_filtered_report(links_dict, estado_filtro, filename):
+def save_filtered_report(links_dict, estado_filtro, filename, cache=None):
     """
     Escribe un reporte con los links en el estado dado (pasados y nuevos),
     enriquecido con los datos cacheados de cada publicación y ordenado de
     menor a mayor precio por m² (las publicaciones sin ese dato van al final).
     """
-    cache = load_cache()
+    cache = load_cache() if cache is None else cache
     filas = []
     for link_original, estado, timestamp in links_dict.values():
         if estado != estado_filtro:
@@ -271,8 +272,19 @@ def save_reports(links_dict):
     # Las publicaciones de descartados.csv no aparecen ni en los reportes ni en
     # el mapa; siguen en already_recommended.csv para no volver a evaluarlas.
     vigentes = sin_descartados(links_dict)
-    save_filtered_report(vigentes, "cumple", report_filename)
-    save_filtered_report(vigentes, "revisar", revisar_filename)
+    # Los avisos republicados del mismo depto se cuentan una sola vez, así los
+    # reportes y el mapa hablan de propiedades y no de publicaciones.
+    cache = load_cache()
+    agrupados, republicaciones = agrupar(vigentes, cache)
+    if republicaciones:
+        tapadas = sum(len(otras) for otras in republicaciones.values())
+        print(f"Republicaciones agrupadas: {tapadas} avisos del mismo depto que otro")
+
+    save_filtered_report(agrupados, "cumple", report_filename, cache)
+    save_filtered_report(agrupados, "revisar", revisar_filename, cache)
+    # Sin agrupar a propósito: generar_mapa agrupa por su cuenta (también corre
+    # solo, desde el servidor y desde la línea de comandos) y necesita ver las
+    # republicaciones para poder contarlas en el popup.
     generar_mapa(vigentes)
 
 

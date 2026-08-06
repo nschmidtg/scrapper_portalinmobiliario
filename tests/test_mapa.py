@@ -14,6 +14,7 @@ PUNTO = {
     "dormitorios": "4", "banos": "3", "piso": "5", "superficie_util": "100 m²",
     "superficie_total": "120 m²", "superficie_terraza": "10 m²", "orientacion": "N",
     "servicio": "Sí", "escritorio": "", "timestamp": "2026-08-02",
+    "republicaciones": 0,
 }
 
 
@@ -138,6 +139,60 @@ class TestBotonDescartar:
         html = render([PUNTO])
         assert '"/descartar"' in html
         assert '"/quitar"' in html
+
+
+class TestRepublicacionesEnElMapa:
+    """
+    Ocho avisos del mismo depto caían en la misma coordenada y se dibujaban uno
+    encima de otro: el panel decía 14 a revisar y en el mapa había 6 pines.
+    """
+
+    def publicaciones(self, *mlc_ids):
+        return {
+            f"https://x/{mlc}_JM": (f"https://x/{mlc}_JM", "revisar", "2026-08-02")
+            for mlc in mlc_ids
+        }
+
+    def test_un_solo_pin_por_depto(self, tmp_path, monkeypatch):
+        cache = {
+            "MLC-1": datos_cacheados(mlc_id="MLC-1", precio=355349688),
+            "MLC-2": datos_cacheados(mlc_id="MLC-2", precio=347180730),
+        }
+        monkeypatch.setattr("src.mapa.mapa_filename", str(tmp_path / "mapa.html"))
+        monkeypatch.setattr("src.mapa.load_cache", lambda: cache)
+
+        generar_mapa(self.publicaciones("MLC-1", "MLC-2"))
+        html = (tmp_path / "mapa.html").read_text(encoding="utf-8")
+        assert html.count('"mlc_id"') == 1
+
+    def test_el_pin_que_queda_es_el_mas_barato(self, tmp_path, monkeypatch):
+        cache = {
+            "MLC-1": datos_cacheados(mlc_id="MLC-1", precio=355349688),
+            "MLC-2": datos_cacheados(mlc_id="MLC-2", precio=347180730),
+        }
+        monkeypatch.setattr("src.mapa.mapa_filename", str(tmp_path / "mapa.html"))
+        monkeypatch.setattr("src.mapa.load_cache", lambda: cache)
+
+        generar_mapa(self.publicaciones("MLC-1", "MLC-2"))
+        html = (tmp_path / "mapa.html").read_text(encoding="utf-8")
+        assert '"mlc_id": "MLC-2"' in html
+        assert '"mlc_id": "MLC-1"' not in html
+
+    def test_build_puntos_cuenta_las_tapadas(self):
+        saved = self.publicaciones("MLC-1", "MLC-2", "MLC-3")
+        cache = {mlc: datos_cacheados(mlc_id=mlc) for mlc in ("MLC-1", "MLC-2", "MLC-3")}
+        puntos = build_puntos(saved, cache, {"MLC-1": ["MLC-2", "MLC-3"]})
+        assert puntos[0]["republicaciones"] == 2
+
+    def test_build_puntos_no_cuenta_de_mas_cuando_no_hay_tapadas(self):
+        saved = self.publicaciones("MLC-1")
+        puntos = build_puntos(saved, {"MLC-1": datos_cacheados(mlc_id="MLC-1")}, {})
+        assert puntos[0]["republicaciones"] == 0
+
+    def test_el_popup_avisa_de_las_republicaciones(self):
+        html = render([{**PUNTO, "republicaciones": 7}])
+        assert "p.republicaciones" in html, "el popup no usa el dato"
+        assert '"republicaciones": 7' in html
 
 
 class TestDescartadosFueraDelMapa:

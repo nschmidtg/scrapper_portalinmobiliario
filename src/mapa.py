@@ -35,6 +35,7 @@ from src.propiedades import (
     mlc_id,
     save_cache,
 )
+from src.republicaciones import agrupar
 
 mapa_filename = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mapa.html"
@@ -117,8 +118,11 @@ def motivo_de(estado: str, datos: dict) -> str:
     return motivo
 
 
-def build_puntos(saved_links: dict, cache: dict) -> list[dict]:
+def build_puntos(
+    saved_links: dict, cache: dict, republicaciones: dict | None = None
+) -> list[dict]:
     """Cruza los estados de already_recommended.csv con los datos cacheados."""
+    republicaciones = republicaciones or {}
     puntos = []
     for link_original, estado, timestamp in saved_links.values():
         identificador = mlc_id(link_original)
@@ -149,6 +153,8 @@ def build_puntos(saved_links: dict, cache: dict) -> list[dict]:
             "servicio": datos.get("servicio") or "",
             "escritorio": datos.get("escritorio") or "",
             "timestamp": (timestamp or "")[:10],
+            # Cuántos avisos más del mismo depto quedaron detrás de este pin.
+            "republicaciones": len(republicaciones.get(identificador, [])),
         })
 
     # Los que cumplen se dibujan al final para que queden encima de los grises.
@@ -214,6 +220,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     background: #f1f3f4; border-left: 3px solid #d0d3d6; border-radius: 0 4px 4px 0;
     color: #5f6368; font-size: 11px; padding: 4px 6px; margin-bottom: 8px;
   }
+  .popup .republicada { color: #80868b; font-size: 11px; margin-bottom: 8px; }
   .popup a { color: #1a73e8; font-weight: 600; text-decoration: none; }
   .popup a:hover { text-decoration: underline; }
   .popup .acciones { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -341,6 +348,8 @@ if (!PUNTOS.length) {
         ${p.gastos_comunes ? `<div class="ggcc">GGCC ${clp(p.gastos_comunes)}</div>` : ""}
         ${specs ? `<div class="specs">${escapar(specs)}</div>` : ""}
         ${p.motivo ? `<div class="motivo">${ESTADOS[p.estado].label}: ${escapar(p.motivo)}</div>` : ""}
+        ${p.republicaciones ? `<div class="republicada">El mismo depto está republicado en
+            ${p.republicaciones} aviso${p.republicaciones > 1 ? "s" : ""} más.</div>` : ""}
         <div class="acciones">
           <a href="${encodeURI(p.link)}" target="_blank" rel="noopener">Ver publicación →</a>
           ${EN_SERVIDOR && p.mlc_id
@@ -539,7 +548,10 @@ def generar_mapa(saved_links: dict, con_backfill: bool = False, resumen: bool = 
     # independiente de con qué estado quedaron guardadas.
     saved_links = sin_descartados(saved_links)
     cache = backfill(saved_links) if con_backfill else load_cache()
-    puntos = build_puntos(saved_links, cache)
+    # Después del backfill, que es lo que le da coordenadas a las publicaciones
+    # nuevas: sin coordenada no se puede reconocer una republicación.
+    saved_links, republicaciones = agrupar(saved_links, cache)
+    puntos = build_puntos(saved_links, cache, republicaciones)
 
     with open(mapa_filename, 'w', encoding='utf-8') as f:
         f.write(render(puntos))

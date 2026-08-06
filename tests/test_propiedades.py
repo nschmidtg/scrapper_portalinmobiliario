@@ -13,6 +13,11 @@ FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "
 
 @pytest.fixture(scope="module")
 def html():
+    # El fixture es una publicación real y no se versiona: trae los datos de
+    # contacto del corredor. En un clon nuevo estos tests se saltean; para
+    # tenerlos, guardar una publicación como tests/fixtures/publicacion.html.
+    if not os.path.exists(FIXTURE):
+        pytest.skip("falta tests/fixtures/publicacion.html (no se versiona)")
     with open(FIXTURE, encoding="utf-8") as f:
         return f.read()
 
